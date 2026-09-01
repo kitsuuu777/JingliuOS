@@ -2,6 +2,9 @@
 
 Personal NixOS flake config for a laptop running Hyprland, with a Honkai: Star Rail (Jingliu) themed desktop and a gaming-focused setup.
 
+![Desktop screenshot](assets/screenshots/desktop.png)
+![Desktop demo](assets/screenshots/demo.gif)
+
 ## What's inside
 
 - **Window manager:** [Hyprland](https://hyprland.org/) (via UWSM), configured through [`hyprland.lua`](https://github.com/hyprland-community) bindings
