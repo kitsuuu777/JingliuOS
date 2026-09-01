@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/31713806/README.md)
 # JingliuOS
 
 Personal NixOS flake config for a laptop running Hyprland, with a Honkai: Star Rail (Jingliu) themed desktop and a gaming-focused setup.
