@@ -11,8 +11,8 @@
       la = "ls -A";
       ".." = "cd ..";
       "..." = "cd ../..";
-      rebuild = "sudo nixos-rebuild switch --flake ~/jingliuOS#jingliuOS";
-      ntest = "sudo nixos-rebuild test --flake ~/jingliuOS#jingliuOS";
+      rebuild = "sudo nixos-rebuild switch --flake /etc/nixos#jingliuOS";
+      ntest = "sudo nixos-rebuild test --flake /etc/nixos#jingliuOS"; 
     };
 
     functions = {
