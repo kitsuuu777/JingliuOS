@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+
+set -u
+
+# ==========================================================
+# KONFIGURACJA
+# ==========================================================
+
+READY_FILE="/run/user/$UID/jingliu-ready.flag"
+READY_LOG="/tmp/jingliu-startup.log"
+
+rm -f "$READY_FILE"
+: > "$READY_LOG"
+
+# ==========================================================
+# POMOCNICZE
+# ==========================================================
+
+log_ready() {
+    printf '[%s] %s\n' "$(date '+%H:%M:%S.%3N')" "$1" >> "$READY_LOG"
+}
+
+# ==========================================================
+# PRZYWRÓCENIE NORMALNEGO DESKTOPU
+# ==========================================================
+
+restore_desktop() {
+    noctalia-shell ipc call bar showBar >/dev/null 2>&1 || true
+
+    hyprctl eval \
+        'hl.config({ cursor = { invisible = false } })' \
+        >/dev/null 2>&1 || true
+}
+
+trap restore_desktop EXIT
+
+# ==========================================================
+# ŚRODOWISKO SESJI
+# ==========================================================
+
+dbus-update-activation-environment --systemd --all
+
+# ==========================================================
+# KURSOR — OFF OD RAZU
+# ==========================================================
+
+hyprctl eval \
+    'hl.config({ cursor = { invisible = true } })' \
+    >/dev/null 2>&1 || true
+
+# ==========================================================
+# JINGLIU SPLASH — ABSOLUTNY PRIORYTET
+# ==========================================================
+
+jingliu-splash &
+splash_pid=$!
+
+log_ready "Jingliu splash started"
+
+# ==========================================================
+# NOCTALIA
+# ==========================================================
+
+noctalia-shell >/tmp/jingliu-noctalia.log 2>&1 &
+
+log_ready "Noctalia started"
+
+until noctalia-shell ipc show 2>/dev/null \
+    | grep -qE '^[[:space:]]*target bar'; do
+    sleep 0.1
+done
+
+log_ready "Noctalia IPC ready"
+
+noctalia-shell ipc call bar hideBar \
+    >/dev/null 2>&1 || true
+
+log_ready "Noctalia bar hidden"
+
+# ==========================================================
+# AUTOSTART
+# ==========================================================
+
+# HSR dashboard
+(
+    sleep 0.5
+    uwsm app -- kitty --class hsr-dashboard --hold fastfetch
+) &
+
+# Firefox
+(
+    sleep 0.5
+    uwsm app -- firefox
+) &
+
+# Vesktop
+(
+    sleep 1
+    uwsm app -- vesktop
+) &
+
+# Pear
+(
+    sleep 1
+    uwsm app -- pear-desktop
+) &
+
+# Heroic
+(
+    sleep 1.5
+    uwsm app -t service -- heroic
+) &
+
+# Dolphin
+(
+    sleep 1.5
+    uwsm app -- dolphin
+) &
+
+log_ready "Autostart processes launched"
+
+# ==========================================================
+# READY CHECK
+# ==========================================================
+
+wait_for_all_windows() {
+    local start_time
+    local now
+    local clients=""
+
+    local hsr_ready=false
+    local firefox_ready=false
+    local vesktop_ready=false
+    local pear_ready=false
+    local heroic_ready=false
+    local dolphin_ready=false
+
+    # Heroic musi istnieć stabilnie przez ten czas,
+    # zanim uznamy go za READY.
+    local heroic_stable_since=0
+    local heroic_stable_time=1000
+
+    start_time=$(date +%s%3N)
+
+    log_ready "READY CHECK START"
+
+    while true; do
+        clients="$(hyprctl clients 2>/dev/null || true)"
+
+        # --------------------------------------------------
+        # HSR DASHBOARD
+        # --------------------------------------------------
+
+        if ! $hsr_ready && \
+            printf '%s\n' "$clients" \
+            | grep -qiE 'class:.*hsr-dashboard'; then
+
+            hsr_ready=true
+            now=$(date +%s%3N)
+
+            log_ready \
+                "hsr-dashboard ready (+$((now - start_time)) ms)"
+        fi
+
+        # --------------------------------------------------
+        # FIREFOX
+        # --------------------------------------------------
+
+        if ! $firefox_ready && \
+            printf '%s\n' "$clients" \
+            | grep -qiE 'class:.*firefox'; then
+
+            firefox_ready=true
+            now=$(date +%s%3N)
+
+            log_ready \
+                "firefox ready (+$((now - start_time)) ms)"
+        fi
+
+        # --------------------------------------------------
+        # VESKTOP
+        # --------------------------------------------------
+
+        if ! $vesktop_ready && \
+            printf '%s\n' "$clients" \
+            | grep -qiE 'class:.*(vesktop|discord)'; then
+
+            vesktop_ready=true
+            now=$(date +%s%3N)
+
+            log_ready \
+                "vesktop ready (+$((now - start_time)) ms)"
+        fi
+
+        # --------------------------------------------------
+        # PEAR / YOUTUBE MUSIC
+        # --------------------------------------------------
+
+        if ! $pear_ready && \
+            printf '%s\n' "$clients" \
+            | grep -qiE 'class:.*com\.github\.th_ch\.youtube_music'; then
+
+            pear_ready=true
+            now=$(date +%s%3N)
+
+            log_ready \
+                "pear / YouTube Music ready (+$((now - start_time)) ms)"
+        fi
+
+        # --------------------------------------------------
+        # HEROIC — STABILITY CHECK
+        # --------------------------------------------------
+
+        if ! $heroic_ready; then
+            if printf '%s\n' "$clients" \
+                | grep -qiE 'class:.*heroic'; then
+
+                now=$(date +%s%3N)
+
+                # Pierwsze wykrycie Heroica.
+                if [ "$heroic_stable_since" -eq 0 ]; then
+                    heroic_stable_since=$now
+
+                    log_ready \
+                        "heroic window detected (+$((now - start_time)) ms)"
+                fi
+
+                # Heroic istnieje nieprzerwanie przez wymagany czas.
+                if [ $((now - heroic_stable_since)) -ge "$heroic_stable_time" ]; then
+                    heroic_ready=true
+
+                    log_ready \
+                        "heroic stable / ready (+$((now - start_time)) ms)"
+                fi
+
+            else
+                # Heroic zniknął zanim osiągnął stabilność.
+                if [ "$heroic_stable_since" -ne 0 ]; then
+                    log_ready "heroic disappeared before stability"
+
+                    heroic_stable_since=0
+                fi
+            fi
+        fi
+
+        # --------------------------------------------------
+        # DOLPHIN
+        # --------------------------------------------------
+
+        if ! $dolphin_ready && \
+            printf '%s\n' "$clients" \
+            | grep -qiE 'class:.*org\.kde\.dolphin'; then
+
+            dolphin_ready=true
+            now=$(date +%s%3N)
+
+            log_ready \
+                "dolphin ready (+$((now - start_time)) ms)"
+        fi
+
+        # --------------------------------------------------
+        # ALL READY
+        # --------------------------------------------------
+
+        if $hsr_ready &&
+           $firefox_ready &&
+           $vesktop_ready &&
+           $pear_ready &&
+           $heroic_ready &&
+           $dolphin_ready
+        then
+            now=$(date +%s%3N)
+
+            log_ready \
+                "ALL READY (+$((now - start_time)) ms)"
+
+            return 0
+        fi
+
+        # --------------------------------------------------
+        # TIMEOUT
+        # --------------------------------------------------
+
+        now=$(date +%s%3N)
+
+        if [ $((now - start_time)) -ge 60000 ]; then
+            log_ready \
+                "READY TIMEOUT (+$((now - start_time)) ms)"
+
+            $hsr_ready || \
+                log_ready "MISSING: hsr-dashboard"
+
+            $firefox_ready || \
+                log_ready "MISSING: firefox"
+
+            $vesktop_ready || \
+                log_ready "MISSING: vesktop"
+
+            $pear_ready || \
+                log_ready "MISSING: pear / YouTube Music"
+
+            $heroic_ready || \
+                log_ready "MISSING: heroic"
+
+            $dolphin_ready || \
+                log_ready "MISSING: dolphin"
+
+            return 1
+        fi
+
+        sleep 0.1
+    done
+}
+
+# ==========================================================
+# WAIT FOR READY
+# ==========================================================
+
+if wait_for_all_windows; then
+    log_ready "Creating READY FILE"
+    printf 'ready\n' > "$READY_FILE"
+else
+    log_ready "READY FAILED — forcing timeout state"
+    printf 'ready\n' > "$READY_FILE"
+fi
+
+# ==========================================================
+# CZEKAJ NA KONIEC SPLASHA
+# ==========================================================
+
+wait "$splash_pid"
+
+# ==========================================================
+# EXIT TRAP
+#
+# - pokazuje bar
+# - przywraca kursor
+# ==========================================================

@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+
+set -u
+
+# ==========================================================
+# KONFIGURACJA
+# ==========================================================
+
+GAMING_WORKSPACE="gaming"
+CHECK_INTERVAL=2
+
+
+gaming_mode=0
+previous_profile=""
+noctalia_dnd_pending=0
+
+# ==========================================================
+# LOGGING
+# ==========================================================
+
+log() {
+    printf '[gaming-watcher] %s\n' "$*"
+}
+
+warn() {
+    printf '[gaming-watcher] WARNING: %s\n' "$*" >&2
+}
+
+error() {
+    printf '[gaming-watcher] ERROR: %s\n' "$*" >&2
+}
+
+# ==========================================================
+# HYPRLAND INSTANCE
+# ==========================================================
+
+wait_for_hyprland() {
+    local attempts=0
+    local max_attempts=60
+    local instance=""
+    local wl_socket=""
+
+    log "Waiting for Hyprland instance..."
+
+    while true; do
+        instance="$(
+            hyprctl -j instances 2>/dev/null |
+                jq -r '.[0].instance // empty'
+        )"
+
+        wl_socket="$(
+            hyprctl -j instances 2>/dev/null |
+                jq -r '.[0].wl_socket // empty'
+        )"
+
+        if [ -n "$instance" ]; then
+            export HYPRLAND_INSTANCE_SIGNATURE="$instance"
+
+            log "Hyprland instance detected: $HYPRLAND_INSTANCE_SIGNATURE"
+
+            if [ -n "$wl_socket" ]; then
+                export WAYLAND_DISPLAY="$wl_socket"
+                log "Wayland socket detected: $WAYLAND_DISPLAY"
+            fi
+
+            return 0
+        fi
+
+        attempts=$((attempts + 1))
+
+        if [ "$attempts" -ge "$max_attempts" ]; then
+            error "Could not detect Hyprland instance"
+            return 1
+        fi
+
+        sleep 1
+    done
+}
+
+# ==========================================================
+# GAME DETECTION
+# ==========================================================
+
+has_game() {
+    hyprctl clients -j 2>/dev/null |
+        jq -e --arg ws "$GAMING_WORKSPACE" '
+            any(.[]?;
+                .workspace.name == $ws
+            )
+        ' >/dev/null 2>&1
+}
+
+# ==========================================================
+# HYPRLAND GAMING MODE
+# ==========================================================
+
+enable_hypr_gaming_mode() {
+    log "Disabling Hyprland effects..."
+
+    if ! hyprctl eval '
+        hl.config({
+            animations = {
+                enabled = false
+            },
+
+            decoration = {
+                blur = {
+                    enabled = false
+                },
+
+                shadow = {
+                    enabled = false
+                }
+            }
+        })
+    ' >/dev/null 2>&1; then
+        warn "Failed to disable Hyprland effects"
+        return 1
+    fi
+
+    log "Hyprland gaming effects disabled"
+    return 0
+}
+
+restore_hypr_config() {
+    log "Restoring Hyprland effects..."
+
+    if ! hyprctl eval '
+        hl.config({
+            animations = {
+                enabled = true
+            },
+
+            decoration = {
+                blur = {
+                    enabled = true
+                },
+
+                shadow = {
+                    enabled = true
+                }
+            }
+        })
+    ' >/dev/null 2>&1; then
+        warn "Failed to restore Hyprland effects"
+        return 1
+    fi
+
+    log "Hyprland effects restored"
+    return 0
+}
+
+# ==========================================================
+# NOCTALIA
+# ==========================================================
+
+noctalia_available() {
+    noctalia-shell ipc show >/dev/null 2>&1
+}
+
+noctalia_enable_dnd() {
+    if ! noctalia_available; then
+        warn "Noctalia IPC unavailable; DND will be retried"
+        return 1
+    fi
+
+    if ! noctalia-shell ipc call notifications enableDND \
+        >/dev/null 2>&1; then
+        warn "Could not enable Noctalia DND"
+        return 1
+    fi
+
+    log "Noctalia DND enabled"
+    return 0
+}
+
+noctalia_disable_dnd() {
+    if ! noctalia_available; then
+        warn "Noctalia IPC unavailable; DND disable skipped"
+        return 1
+    fi
+
+    if ! noctalia-shell ipc call notifications disableDND \
+        >/dev/null 2>&1; then
+        warn "Could not disable Noctalia DND"
+        return 1
+    fi
+
+    log "Noctalia DND disabled"
+    return 0
+}
+
+# ==========================================================
+# GAMING ON
+# ==========================================================
+
+gaming_on() {
+    [ "$gaming_mode" -eq 1 ] || {
+        log "GAME DETECTED"
+
+        # ------------------------------------------------------
+        # Zapamiętaj aktualny profil zasilania.
+        # ------------------------------------------------------
+
+        previous_profile="$(
+            powerprofilesctl get 2>/dev/null || true
+        )"
+
+        log "Previous power profile: ${previous_profile:-unknown}"
+
+        # ------------------------------------------------------
+        # Performance profile
+        # ------------------------------------------------------
+
+        if ! powerprofilesctl set performance \
+            >/dev/null 2>&1; then
+            error "Could not enable performance power profile"
+            return 1
+        fi
+
+        gaming_mode=1
+
+        log "Performance mode ON"
+        log "Current profile: $(powerprofilesctl get 2>/dev/null || echo unknown)"
+
+        # ------------------------------------------------------
+        # Hyprland
+        # ------------------------------------------------------
+
+        enable_hypr_gaming_mode
+
+        log "Gaming mode fully enabled"
+    }
+
+    # ----------------------------------------------------------
+    # Noctalia DND
+    #
+    # Nawet jeśli Noctalia nie była gotowa przy pierwszym
+    # wykryciu gry, będziemy próbować ponownie.
+    # ----------------------------------------------------------
+
+    if [ "$noctalia_dnd_pending" -eq 1 ] || ! noctalia_available; then
+        if noctalia_enable_dnd; then
+            noctalia_dnd_pending=0
+        else
+            noctalia_dnd_pending=1
+        fi
+    elif [ "$gaming_mode" -eq 1 ]; then
+        :
+    fi
+}
+
+# ==========================================================
+# GAMING OFF
+# ==========================================================
+
+gaming_off() {
+    [ "$gaming_mode" -eq 0 ] && return 0
+
+    log "GAME CLOSED"
+
+    # ------------------------------------------------------
+    # Restore power profile
+    # ------------------------------------------------------
+
+    if [ -n "$previous_profile" ]; then
+        if powerprofilesctl set "$previous_profile" \
+            >/dev/null 2>&1; then
+            log "Restored power profile: $previous_profile"
+        else
+            warn "Could not restore power profile: $previous_profile"
+        fi
+    else
+        if powerprofilesctl set balanced >/dev/null 2>&1; then
+            log "Restored power profile: balanced"
+        else
+            warn "Could not restore balanced power profile"
+        fi
+    fi
+
+    # ------------------------------------------------------
+    # Restore Hyprland
+    # ------------------------------------------------------
+
+    restore_hypr_config
+
+    # ------------------------------------------------------
+    # Restore Noctalia DND
+    # ------------------------------------------------------
+
+    noctalia_disable_dnd
+
+    gaming_mode=0
+    previous_profile=""
+    noctalia_dnd_pending=0
+
+    log "Performance mode OFF"
+    log "Current profile: $(powerprofilesctl get 2>/dev/null || echo unknown)"
+    log "Gaming mode fully disabled"
+}
+
+# ==========================================================
+# CLEANUP
+# ==========================================================
+
+cleanup() {
+    gaming_off
+}
+
+trap cleanup EXIT
+trap 'exit 0' INT TERM
+
+# ==========================================================
+# STARTUP
+# ==========================================================
+
+log "Starting Gaming Watcher"
+log "Watching workspace: $GAMING_WORKSPACE"
+log "Check interval: ${CHECK_INTERVAL}s"
+
+# ==========================================================
+# WAIT FOR HYPRLAND
+# ==========================================================
+
+if ! wait_for_hyprland; then
+    error "Hyprland was not detected; exiting"
+    exit 1
+fi
+
+log "Initialization complete"
+
+# ==========================================================
+# MAIN LOOP
+# ==========================================================
+
+while true; do
+    if has_game; then
+        gaming_on
+    else
+        gaming_off
+    fi
+
+    sleep "$CHECK_INTERVAL"
+done

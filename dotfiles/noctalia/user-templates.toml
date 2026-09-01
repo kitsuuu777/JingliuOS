@@ -1,0 +1,6 @@
+[config]
+
+[templates.pywalfox]
+input_path = "~/.config/noctalia/templates/pywalfox.json"
+output_path = "~/.cache/wal/colors.json"
+post_hook = "pywalfox update"
